@@ -2,6 +2,7 @@
 package cborlite
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"sort"
@@ -16,6 +17,41 @@ type Counter struct {
 type Map struct {
 	Keys   []string
 	Values []any
+
+	index map[string]int
+}
+
+// readArgument 按附加信息读出头部的参数。
+func readArgument(info int, data []byte, pos int, c *Counter) (uint64, int, error) {
+	switch {
+	case info < 24:
+		return uint64(info), pos, nil
+	case info == 24:
+		if pos+1 > len(data) {
+			return 0, pos, errors.New("eof")
+		}
+		c.Scanned++
+		return uint64(data[pos]), pos + 1, nil
+	case info == 25:
+		if pos+2 > len(data) {
+			return 0, pos, errors.New("eof")
+		}
+		c.Scanned++
+		return uint64(binary.BigEndian.Uint16(data[pos:])), pos + 2, nil
+	case info == 26:
+		if pos+4 > len(data) {
+			return 0, pos, errors.New("eof")
+		}
+		c.Scanned++
+		return uint64(binary.BigEndian.Uint32(data[pos:])), pos + 4, nil
+	case info == 27:
+		if pos+8 > len(data) {
+			return 0, pos, errors.New("eof")
+		}
+		c.Scanned++
+		return binary.BigEndian.Uint64(data[pos:]), pos + 8, nil
+	}
+	return 0, pos, errors.New("bad additional info")
 }
 
 func decode(data []byte, pos int, c *Counter) (any, int, error) {
@@ -28,25 +64,51 @@ func decode(data []byte, pos int, c *Counter) (any, int, error) {
 	info := int(head & 0x1f)
 	pos++
 	switch major {
-	case 0:
-		return int(info), pos, nil
-	case 1:
-		return -int(info), pos, nil
+	case 0, 1:
+		n, next, err := readArgument(info, data, pos, c)
+		if err != nil {
+			return nil, pos, err
+		}
+		if major == 1 {
+			return -1 - int(n), next, nil
+		}
+		return int(n), next, nil
 	case 2, 3:
-		length := info
-		if pos+length > len(data) {
+		length, next, err := readArgument(info, data, pos, c)
+		if err != nil {
+			return nil, pos, err
+		}
+		pos = next
+		if pos+int(length) > len(data) {
 			return nil, pos, errors.New("eof")
 		}
-		value := string(data[pos : pos+length])
-		return value, pos + length, nil
+		value := string(data[pos : pos+int(length)])
+		return value, pos + int(length), nil
 	case 4:
 		out := []any{}
-		for i := 0; i < info; i++ {
-			walk := pos
-			for walk < pos {
+		if info == 31 {
+			for {
+				if pos >= len(data) {
+					return nil, pos, errors.New("eof")
+				}
 				c.Scanned++
-				walk++
+				if data[pos] == 0xff {
+					return out, pos + 1, nil
+				}
+				value, next, err := decode(data, pos, c)
+				if err != nil {
+					return out, pos, err
+				}
+				out = append(out, value)
+				pos = next
 			}
+		}
+		count, next, err := readArgument(info, data, pos, c)
+		if err != nil {
+			return nil, pos, err
+		}
+		pos = next
+		for i := uint64(0); i < count; i++ {
 			value, next, err := decode(data, pos, c)
 			if err != nil {
 				return out, pos, err
@@ -75,8 +137,12 @@ func EncodeMap(m Map, c *Counter) []byte {
 	for i, key := range m.Keys {
 		pairs[i] = pair{key: encodeText(key), val: encodeInt(m.Values[i].(int))}
 	}
+	sort.Slice(pairs, func(i, j int) bool {
+		c.Scanned++
+		return bytes.Compare(pairs[i].key, pairs[j].key) < 0
+	})
 	var out []byte
-	out = append(out, 0xa0|byte(len(pairs)))
+	out = append(out, encodeHead(5, uint64(len(pairs)))...)
 	for _, p := range pairs {
 		c.Scanned++
 		out = append(out, p.key...)
@@ -87,26 +153,52 @@ func EncodeMap(m Map, c *Counter) []byte {
 
 // Get 按键取映射里的值。
 func (m *Map) Get(key string, c *Counter) (any, bool) {
-	for i, k := range m.Keys {
-		c.Scanned++
-		if k == key {
-			return m.Values[i], true
+	if m.index == nil || len(m.index) != len(m.Keys) {
+		m.index = make(map[string]int, len(m.Keys))
+		for i, k := range m.Keys {
+			c.Scanned++
+			m.index[k] = i
 		}
 	}
-	return nil, false
+	c.Scanned++
+	i, ok := m.index[key]
+	if !ok {
+		return nil, false
+	}
+	return m.Values[i], true
+}
+
+// encodeHead 编码主类型与参数。
+func encodeHead(major byte, n uint64) []byte {
+	head := major << 5
+	switch {
+	case n < 24:
+		return []byte{head | byte(n)}
+	case n <= 0xff:
+		return []byte{head | 24, byte(n)}
+	case n <= 0xffff:
+		out := []byte{head | 25, 0, 0}
+		binary.BigEndian.PutUint16(out[1:], uint16(n))
+		return out
+	case n <= 0xffffffff:
+		out := []byte{head | 26, 0, 0, 0, 0}
+		binary.BigEndian.PutUint32(out[1:], uint32(n))
+		return out
+	default:
+		out := []byte{head | 27, 0, 0, 0, 0, 0, 0, 0, 0}
+		binary.BigEndian.PutUint64(out[1:], n)
+		return out
+	}
 }
 
 func encodeText(s string) []byte {
-	out := []byte{0x60 | byte(len(s))}
+	out := encodeHead(3, uint64(len(s)))
 	return append(out, []byte(s)...)
 }
 
 func encodeInt(n int) []byte {
 	if n >= 0 {
-		return []byte{byte(n)}
+		return encodeHead(0, uint64(n))
 	}
-	return []byte{0x20 | byte(-n-1)}
+	return encodeHead(1, uint64(-1-n))
 }
-
-var _ = sort.Ints
-var _ = binary.BigEndian

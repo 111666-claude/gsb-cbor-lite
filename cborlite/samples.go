@@ -45,6 +45,14 @@ func Samples() []Scenario {
 			}
 			return map[string]any{"value": n}
 		}},
+		{Name: "indef", Run: func() map[string]any {
+			value, _ := Decode([]byte{0x9f, 0x01, 0x02, 0x03, 0xff}, &Counter{})
+			items, ok := value.([]any)
+			if !ok {
+				return map[string]any{"count": 0}
+			}
+			return map[string]any{"count": len(items)}
+		}},
 		{Name: "canon", Run: func() map[string]any {
 			data := EncodeMap(Map{Keys: []string{"b", "a"}, Values: []any{1, 1}}, &Counter{})
 			return map[string]any{"first": string(data[2:3])}

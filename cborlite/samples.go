@@ -37,6 +37,15 @@ func Samples() []Scenario {
 			}
 			return map[string]any{"count": len(items)}
 		}},
+		{Name: "indef", Run: func() map[string]any {
+			data := []byte{0x9f, 0x01, 0x02, 0x03, 0xff}
+			value, _ := Decode(data, &Counter{})
+			items, ok := value.([]any)
+			if !ok {
+				return map[string]any{"count": 0}
+			}
+			return map[string]any{"count": len(items)}
+		}},
 		{Name: "negint", Run: func() map[string]any {
 			value, _ := Decode([]byte{0x20}, &Counter{})
 			n, ok := value.(int)
